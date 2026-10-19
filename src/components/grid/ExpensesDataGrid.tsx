@@ -88,6 +88,14 @@ export default function ExpensesDataGrid({
     currentUserId === userBId ? userBId : userAId
   );
 
+  const isRealProfileId = (id?: string | null) =>
+    Boolean(
+      id &&
+        id !== YAN_USER_ID &&
+        id !== LARISSA_USER_ID &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+    );
+
   const handleQuickAdd = (e: React.FormEvent) => {
     e.preventDefault();
     const numericAmount = parseFloat(newAmount.replace(',', '.'));
@@ -95,12 +103,18 @@ export default function ExpensesDataGrid({
       return;
     }
 
-    const resolvedPaidByUserId =
+    const candidatePayerId =
       newPayerType === 'USER_A'
         ? userAId
         : newPayerType === 'USER_B'
         ? userBId
         : newDisbursedBy;
+
+    const resolvedPaidByUserId = isRealProfileId(candidatePayerId)
+      ? candidatePayerId
+      : isRealProfileId(currentUserId)
+      ? currentUserId
+      : null;
 
     onAddExpense({
       family_group_id: familyGroupId,
@@ -110,7 +124,7 @@ export default function ExpensesDataGrid({
       category: newCategory,
       payer_type: newPayerType,
       paid_by_user_id: resolvedPaidByUserId,
-      created_by: currentUserId,
+      created_by: isRealProfileId(currentUserId) ? currentUserId : null,
     });
 
     setNewDescription('');

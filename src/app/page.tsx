@@ -105,43 +105,74 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [showCoupleDetails, setShowCoupleDetails] = useState(false);
 
-  // Carrega Receita Mensal e Gastos (do Supabase se configurado ou LocalStorage)
-  useEffect(() => {
-    if (!familyGroup) return;
+  // Resolve dinamicamente os IDs de Yan e Larissa a partir dos perfis reais logados no Supabase
+  const resolvedYanId = useMemo(() => {
+    if (currentUser?.role_label !== 'Larissa' && currentUser?.role_label !== 'Esposa') {
+      return currentUser?.id || YAN_ID;
+    }
+    return partnerUser?.id || YAN_ID;
+  }, [currentUser, partnerUser]);
 
+  const resolvedLarissaId = useMemo(() => {
+    if (currentUser?.role_label === 'Larissa' || currentUser?.role_label === 'Esposa') {
+      return currentUser?.id || LARISSA_ID;
+    }
+    return partnerUser?.id || LARISSA_ID;
+  }, [currentUser, partnerUser]);
+
+  const targetGroupId = familyGroup?.id || currentUser?.family_group_id || null;
+
+  // Função reutilizável para buscar os gastos mais recentes do Supabase (Refetch)
+  const fetchExpensesFromSupabase = React.useCallback(async () => {
+    if (!isSupabaseReady) return;
+    const supabase = createClient();
+
+    let query = supabase
+      .from('expenses')
+      .select('*')
+      .order('expense_date', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (targetGroupId) {
+      query = query.eq('family_group_id', targetGroupId);
+    }
+
+    const { data: expData, error } = await query;
+    if (!error && expData) {
+      setExpenses(
+        expData.map((item) => ({
+          ...(item as Expense),
+          amount: Number(item.amount),
+        }))
+      );
+    }
+  }, [isSupabaseReady, targetGroupId]);
+
+  // Carrega Receita Mensal e Gastos (do Supabase se configurado ou LocalStorage) + Realtime
+  useEffect(() => {
     const loadBudgetAndExpenses = async () => {
       if (isSupabaseReady) {
+        if (!currentUser) return;
         const supabase = createClient();
         const now = new Date();
         const year = now.getFullYear();
         const month = now.getMonth() + 1;
 
-        const { data: budgetData } = await supabase
-          .from('monthly_budgets')
-          .select('*')
-          .eq('family_group_id', familyGroup.id)
-          .eq('year', year)
-          .eq('month', month)
-          .maybeSingle();
+        if (targetGroupId) {
+          const { data: budgetData } = await supabase
+            .from('monthly_budgets')
+            .select('*')
+            .eq('family_group_id', targetGroupId)
+            .eq('year', year)
+            .eq('month', month)
+            .maybeSingle();
 
-        if (budgetData) {
-          setTotalIncome(Number(budgetData.total_income));
+          if (budgetData) {
+            setTotalIncome(Number(budgetData.total_income));
+          }
         }
 
-        const { data: expData } = await supabase
-          .from('expenses')
-          .select('*')
-          .eq('family_group_id', familyGroup.id)
-          .order('expense_date', { ascending: false });
-
-        if (expData) {
-          setExpenses(
-            expData.map((item) => ({
-              ...item,
-              amount: Number(item.amount),
-            })) as Expense[]
-          );
-        }
+        await fetchExpensesFromSupabase();
         return;
       }
 
@@ -163,7 +194,26 @@ export default function HomePage() {
     };
 
     loadBudgetAndExpenses();
-  }, [familyGroup, isSupabaseReady]);
+
+    // Assinatura Realtime no Supabase para atualizar a planilha automaticamente
+    if (isSupabaseReady && currentUser) {
+      const supabase = createClient();
+      const channel = supabase
+        .channel('realtime-expenses-grid')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'expenses' },
+          () => {
+            fetchExpensesFromSupabase();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
+  }, [currentUser, targetGroupId, isSupabaseReady, fetchExpensesFromSupabase]);
 
   const totalExpenses = useMemo(
     () => expenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0),
@@ -172,24 +222,24 @@ export default function HomePage() {
 
   // Cálculo Splitwise e totais por aba (Passo 3)
   const splitwiseSummary = useMemo(
-    () => calculateCoupleSplitwise(expenses, YAN_ID, LARISSA_ID),
-    [expenses]
+    () => calculateCoupleSplitwise(expenses, resolvedYanId, resolvedLarissaId),
+    [expenses, resolvedYanId, resolvedLarissaId]
   );
 
   const yanExpenses = useMemo(
     () =>
       expenses.filter(
-        (e) => e.paid_by_user_id === YAN_ID || e.payer_type === 'USER_A'
+        (e) => e.payer_type === 'USER_A' || e.paid_by_user_id === resolvedYanId
       ),
-    [expenses]
+    [expenses, resolvedYanId]
   );
 
   const larissaExpenses = useMemo(
     () =>
       expenses.filter(
-        (e) => e.paid_by_user_id === LARISSA_ID || e.payer_type === 'USER_B'
+        (e) => e.payer_type === 'USER_B' || e.paid_by_user_id === resolvedLarissaId
       ),
-    [expenses]
+    [expenses, resolvedLarissaId]
   );
 
   const tabCounts = useMemo(
@@ -218,12 +268,12 @@ export default function HomePage() {
 
   const handleUpdateIncome = async (newIncome: number) => {
     setTotalIncome(newIncome);
-    if (isSupabaseReady && familyGroup) {
+    if (isSupabaseReady && targetGroupId) {
       const supabase = createClient();
       const now = new Date();
       await supabase.from('monthly_budgets').upsert(
         {
-          family_group_id: familyGroup.id,
+          family_group_id: targetGroupId,
           year: now.getFullYear(),
           month: now.getMonth() + 1,
           total_income: newIncome,
@@ -236,31 +286,66 @@ export default function HomePage() {
   };
 
   const handleAddExpense = async (newExpenseData: Omit<Expense, 'id' | 'created_at'>) => {
-    if (isSupabaseReady && familyGroup) {
+    // 1. Atualização Otimista Imediata no Estado do React (Planilha + Dashboard mudam na hora!)
+    const tempId = 'temp-' + Date.now();
+    const optimisticExpense: Expense = {
+      ...newExpenseData,
+      family_group_id: targetGroupId || newExpenseData.family_group_id,
+      amount: Number(newExpenseData.amount),
+      id: tempId,
+      created_at: new Date().toISOString(),
+    };
+
+    setExpenses((prev) => [optimisticExpense, ...prev]);
+
+    if (isSupabaseReady) {
       const supabase = createClient();
+      const payloadToInsert = {
+        ...newExpenseData,
+        family_group_id: targetGroupId || newExpenseData.family_group_id,
+      };
+
       const { data, error } = await supabase
         .from('expenses')
-        .insert(newExpenseData)
+        .insert(payloadToInsert)
         .select('*')
         .single();
 
       if (!error && data) {
-        setExpenses((prev) => [{ ...(data as Expense), amount: Number(data.amount) }, ...prev]);
+        setExpenses((prev) =>
+          prev.map((item) =>
+            item.id === tempId ? { ...(data as Expense), amount: Number(data.amount) } : item
+          )
+        );
       }
+
+      // 2. Faz o refetch completo do Supabase para garantir sincronia 100% com o banco
+      await fetchExpensesFromSupabase();
       return;
     }
 
-    const created: Expense = {
-      ...newExpenseData,
-      id: 'exp-' + Date.now(),
-      created_at: new Date().toISOString(),
-    };
-    const nextList = [created, ...expenses];
-    setExpenses(nextList);
-    localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(nextList));
+    // Modo Local
+    setExpenses((prev) => {
+      const nextList = prev.map((item) =>
+        item.id === tempId ? { ...item, id: 'exp-' + Date.now() } : item
+      );
+      localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(nextList));
+      return nextList;
+    });
   };
 
   const handleUpdateExpense = async (updated: Expense) => {
+    // Atualização otimista imediata no estado local
+    setExpenses((prev) => {
+      const nextList = prev.map((item) =>
+        item.id === updated.id ? { ...updated, amount: Number(updated.amount) } : item
+      );
+      if (!isSupabaseReady) {
+        localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(nextList));
+      }
+      return nextList;
+    });
+
     if (isSupabaseReady) {
       const supabase = createClient();
       await supabase
@@ -268,29 +353,19 @@ export default function HomePage() {
         .update({
           expense_date: updated.expense_date,
           description: updated.description,
-          amount: updated.amount,
+          amount: Number(updated.amount),
           category: updated.category,
           payer_type: updated.payer_type,
           paid_by_user_id: updated.paid_by_user_id,
         })
         .eq('id', updated.id);
-    }
 
-    setExpenses((prev) => {
-      const nextList = prev.map((item) => (item.id === updated.id ? { ...updated } : item));
-      if (!isSupabaseReady) {
-        localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(nextList));
-      }
-      return nextList;
-    });
+      await fetchExpensesFromSupabase();
+    }
   };
 
   const handleDeleteExpense = async (id: string) => {
-    if (isSupabaseReady) {
-      const supabase = createClient();
-      await supabase.from('expenses').delete().eq('id', id);
-    }
-
+    // Remoção otimista imediata no estado local
     setExpenses((prev) => {
       const nextList = prev.filter((item) => item.id !== id);
       if (!isSupabaseReady) {
@@ -298,6 +373,12 @@ export default function HomePage() {
       }
       return nextList;
     });
+
+    if (isSupabaseReady) {
+      const supabase = createClient();
+      await supabase.from('expenses').delete().eq('id', id);
+      await fetchExpensesFromSupabase();
+    }
   };
 
   const copyInviteCode = () => {
@@ -503,10 +584,10 @@ export default function HomePage() {
           onAddExpense={handleAddExpense}
           onUpdateExpense={handleUpdateExpense}
           onDeleteExpense={handleDeleteExpense}
-          familyGroupId={familyGroup?.id || DEFAULT_GROUP_ID}
+          familyGroupId={targetGroupId || DEFAULT_GROUP_ID}
           currentUserId={currentUser.id}
-          userAId={YAN_ID}
-          userBId={LARISSA_ID}
+          userAId={resolvedYanId}
+          userBId={resolvedLarissaId}
         />
       </main>
     </div>
