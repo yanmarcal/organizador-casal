@@ -10,11 +10,26 @@ import {
   type ColDef,
   type CellValueChangedEvent,
   type ICellRendererParams,
+  type RowClassParams,
 } from 'ag-grid-community';
-import type { Expense, PayerType } from '@/lib/types/database.types';
-import { Plus, Trash2, Table2, FileUp, AlertCircle } from 'lucide-react';
+import type {
+  Expense,
+  ExtractedExpenseItem,
+  PayerType,
+} from '@/lib/types/database.types';
+import {
+  Plus,
+  Trash2,
+  Table2,
+  FileUp,
+  AlertCircle,
+  Sparkles,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 import { formatBRL } from '@/components/dashboard/SummaryHeader';
 import StatementImportModal from './StatementImportModal';
+import PhotoPrintDropzone from './PhotoPrintDropzone';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -48,10 +63,14 @@ const LABEL_TO_PAYER: Record<string, PayerType> = {
 
 interface ExpensesDataGridProps {
   expenses: Expense[];
+  draftExpenses?: Expense[];
   onAddExpense: (newExpense: Omit<Expense, 'id' | 'created_at'>) => Promise<void> | void;
   onBatchAddExpenses?: (newExpenses: Omit<Expense, 'id' | 'created_at'>[]) => Promise<void>;
   onUpdateExpense: (updated: Expense) => Promise<void> | void;
   onDeleteExpense: (id: string) => Promise<void> | void;
+  onAddDraftExpenses?: (items: ExtractedExpenseItem[]) => void;
+  onSaveAllDrafts?: () => Promise<void>;
+  onDiscardDrafts?: () => void;
   familyGroupId: string;
   currentUserId: string;
   activeRole?: 'USER_A' | 'USER_B';
@@ -72,10 +91,14 @@ const darkGridTheme = themeQuartz.withPart(colorSchemeDarkBlue).withParams({
 
 export default function ExpensesDataGrid({
   expenses,
+  draftExpenses = [],
   onAddExpense,
   onBatchAddExpenses,
   onUpdateExpense,
   onDeleteExpense,
+  onAddDraftExpenses,
+  onSaveAllDrafts,
+  onDiscardDrafts,
   familyGroupId,
   currentUserId,
   activeRole = 'USER_A',
@@ -95,11 +118,23 @@ export default function ExpensesDataGrid({
   );
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submittingRow, setSubmittingRow] = useState(false);
+  const [savingDrafts, setSavingDrafts] = useState(false);
 
   // Sincroniza o pagador padrão no formulário quando o utilizador troca entre Yan e Larissa no Header
   useEffect(() => {
     setNewDisbursedBy(activeRole === 'USER_B' ? userBId : userAId);
   }, [activeRole, userAId, userBId]);
+
+  // Junta os itens em Rascunho (no topo da planilha) com as despesas salvas
+  const combinedRows = useMemo(
+    () => [...draftExpenses, ...expenses],
+    [draftExpenses, expenses]
+  );
+
+  const draftsTotalAmount = useMemo(
+    () => draftExpenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0),
+    [draftExpenses]
+  );
 
   const isRealProfileId = (id?: string | null) =>
     Boolean(
@@ -166,6 +201,16 @@ export default function ExpensesDataGrid({
     }
   };
 
+  const handleSaveAllDraftsClick = async () => {
+    if (!onSaveAllDrafts || draftExpenses.length === 0) return;
+    setSavingDrafts(true);
+    try {
+      await onSaveAllDrafts();
+    } finally {
+      setSavingDrafts(false);
+    }
+  };
+
   // Alterna rapidamente o pagador ao clicar no badge dentro da planilha
   const cyclePayerType = (expense: Expense) => {
     const nextMap: Record<PayerType, PayerType> = {
@@ -185,6 +230,7 @@ export default function ExpensesDataGrid({
       ...expense,
       payer_type: nextType,
       paid_by_user_id: nextPaidBy,
+      ai_payer_hint: nextType,
     });
   };
 
@@ -194,13 +240,28 @@ export default function ExpensesDataGrid({
         field: 'expense_date',
         headerName: 'Data',
         editable: true,
-        width: 125,
+        width: 135,
         sortable: true,
         filter: true,
-        valueFormatter: (params) => {
-          if (!params.value) return '';
-          const [y, m, d] = String(params.value).split('-');
-          return y && m && d ? `${d}/${m}/${y}` : params.value;
+        cellRenderer: (params: ICellRendererParams<Expense>) => {
+          if (!params.data) return null;
+          const raw = params.data.expense_date;
+          const [y, m, d] = String(raw || '').split('-');
+          const formatted = y && m && d ? `${d}/${m}/${y}` : raw;
+          return (
+            <div className="flex items-center gap-1.5">
+              {params.data.is_draft && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  title="Rascunho extraído por IA — revise e clique em Salvar Tudo"
+                >
+                  <Sparkles className="w-2.5 h-2.5" />
+                  Rascunho
+                </span>
+              )}
+              <span>{formatted}</span>
+            </div>
+          );
         },
       },
       {
@@ -208,9 +269,25 @@ export default function ExpensesDataGrid({
         headerName: 'Descrição',
         editable: true,
         flex: 1.5,
-        minWidth: 180,
+        minWidth: 200,
         sortable: true,
         filter: true,
+        cellRenderer: (params: ICellRendererParams<Expense>) => {
+          if (!params.data) return null;
+          return (
+            <div className="flex items-center gap-2 truncate">
+              <span
+                className={
+                  params.data.is_draft
+                    ? 'font-semibold text-amber-100 truncate'
+                    : 'text-slate-100 truncate'
+                }
+              >
+                {params.data.description}
+              </span>
+            </div>
+          );
+        },
       },
       {
         field: 'amount',
@@ -228,7 +305,10 @@ export default function ExpensesDataGrid({
           return isNaN(parsed) || parsed <= 0 ? params.oldValue : parsed;
         },
         valueFormatter: (params) => formatBRL(Number(params.value || 0)),
-        cellClass: 'font-semibold text-emerald-300',
+        cellClass: (params) =>
+          params.data?.is_draft
+            ? 'font-bold text-amber-300'
+            : 'font-semibold text-emerald-300',
       },
       {
         field: 'category',
@@ -246,7 +326,7 @@ export default function ExpensesDataGrid({
         field: 'payer_type',
         headerName: 'Quem Pagou (Clique p/ trocar)',
         editable: true,
-        width: 195,
+        width: 205,
         sortable: true,
         filter: true,
         cellEditor: 'agSelectCellEditor',
@@ -263,6 +343,7 @@ export default function ExpensesDataGrid({
             const updated: Expense = {
               ...params.data,
               payer_type: mapped,
+              ai_payer_hint: mapped,
               paid_by_user_id:
                 mapped === 'USER_A'
                   ? userAId
@@ -278,10 +359,15 @@ export default function ExpensesDataGrid({
         cellRenderer: (params: ICellRendererParams<Expense>) => {
           if (!params.data) return null;
           const row = params.data;
-          const label = PAYER_LABELS[row.payer_type] || 'Dividido (Casal)';
-          const isYan = row.payer_type === 'USER_A';
-          const isLarissa = row.payer_type === 'USER_B';
-          const badgeColors = isYan
+          const isPendingAi = row.is_draft && row.ai_payer_hint === 'PENDENTE';
+          const label = isPendingAi
+            ? 'Pendente (Clique p/ definir)'
+            : PAYER_LABELS[row.payer_type] || 'Dividido (Casal)';
+          const isYan = !isPendingAi && row.payer_type === 'USER_A';
+          const isLarissa = !isPendingAi && row.payer_type === 'USER_B';
+          const badgeColors = isPendingAi
+            ? 'bg-amber-500/20 text-amber-200 border-amber-500/40 hover:bg-amber-500/30'
+            : isYan
             ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
             : isLarissa
             ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 hover:bg-purple-500/25'
@@ -294,9 +380,10 @@ export default function ExpensesDataGrid({
               title="Clique para alternar entre Dividido, Yan e Larissa"
               className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border transition cursor-pointer ${badgeColors}`}
             >
+              {isPendingAi && '⏳ '}
               {isYan && '👤 '}
               {isLarissa && '👩‍❤️‍👨 '}
-              {!isYan && !isLarissa && '🤝 '}
+              {!isPendingAi && !isYan && !isLarissa && '🤝 '}
               {label}
             </button>
           );
@@ -344,7 +431,7 @@ export default function ExpensesDataGrid({
               type="button"
               onClick={() => onDeleteExpense(id)}
               className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
-              title="Excluir despesa"
+              title={params.data.is_draft ? 'Remover rascunho' : 'Excluir despesa'}
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -364,8 +451,80 @@ export default function ExpensesDataGrid({
     }
   };
 
+  const getRowStyle = (params: RowClassParams<Expense>) => {
+    if (params.data?.is_draft) {
+      return {
+        backgroundColor: 'rgba(245, 158, 11, 0.08)',
+        borderLeft: '3px solid #f59e0b',
+      };
+    }
+    return undefined;
+  };
+
   return (
     <div className="space-y-4">
+      {/* 1. Área de Dropzone & Botão "Importar Foto/Print" via Gemini Vision IA */}
+      {onAddDraftExpenses && (
+        <PhotoPrintDropzone
+          onExtractedDrafts={(items) => {
+            onAddDraftExpenses(items);
+          }}
+        />
+      )}
+
+      {/* 2. Barra de Revisão de Rascunhos IA ("Salvar Tudo" / "Descartar") */}
+      {draftExpenses.length > 0 && (
+        <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-xl bg-amber-500/20 text-amber-300 shrink-0 mt-0.5">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h4 className="text-sm font-bold text-amber-200">
+                  {draftExpenses.length}{' '}
+                  {draftExpenses.length === 1
+                    ? 'item em Rascunho aguardando revisão'
+                    : 'itens em Rascunho aguardando revisão'}
+                </h4>
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Total dos Rascunhos: {formatBRL(draftsTotalAmount)}
+                </span>
+              </div>
+              <p className="text-xs text-amber-100/80 mt-0.5">
+                Estes gastos foram extraídos da sua foto/print e ainda não foram salvos no banco. Você pode editar a categoria, valor ou quem pagou diretamente nas linhas destacadas abaixo e clicar em <strong>Salvar Tudo</strong>.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto justify-end">
+            {onDiscardDrafts && (
+              <button
+                type="button"
+                onClick={onDiscardDrafts}
+                disabled={savingDrafts}
+                className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-rose-500/20 border border-slate-700 hover:border-rose-500/40 text-slate-300 hover:text-rose-200 text-xs font-semibold flex items-center gap-1.5 transition"
+              >
+                <XCircle className="w-4 h-4" />
+                Descartar Rascunhos
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleSaveAllDraftsClick}
+              disabled={savingDrafts}
+              className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-md shadow-emerald-500/20"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              {savingDrafts
+                ? 'Salvando no Supabase...'
+                : `Salvar Tudo (${draftExpenses.length})`}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Alerta de Validação de Campos */}
       {validationError && (
         <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-200 flex items-center gap-2">
@@ -512,11 +671,13 @@ export default function ExpensesDataGrid({
               className="px-3.5 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-semibold text-xs flex items-center gap-1.5 transition"
             >
               <FileUp className="w-3.5 h-3.5" />
-              Importar Fatura (CSV/OFX/PDF/PNG/JPEG)
+              Importar Extrato (CSV/OFX/PDF)
             </button>
 
             <span className="text-[11px] text-slate-400">
-              Exibindo {expenses.length} {expenses.length === 1 ? 'lançamento' : 'lançamentos'}
+              Exibindo {combinedRows.length}{' '}
+              {combinedRows.length === 1 ? 'lançamento' : 'lançamentos'}
+              {draftExpenses.length > 0 && ` (${draftExpenses.length} em rascunho)`}
             </span>
           </div>
         </div>
@@ -524,10 +685,11 @@ export default function ExpensesDataGrid({
         <div style={{ width: '100%', height: 420 }}>
           <AgGridReact<Expense>
             theme={darkGridTheme}
-            rowData={expenses}
+            rowData={combinedRows}
             columnDefs={columnDefs}
             onCellValueChanged={handleCellValueChanged}
             getRowId={(params) => params.data.id}
+            getRowStyle={getRowStyle}
             animateRows={true}
             singleClickEdit={false}
             stopEditingWhenCellsLoseFocus={true}

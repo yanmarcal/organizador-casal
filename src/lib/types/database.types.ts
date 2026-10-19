@@ -43,6 +43,16 @@ export interface Expense {
   paid_by_user_id: string | null;
   created_by: string | null;
   created_at?: string;
+  is_draft?: boolean; // Rascunho extraído por IA aguardando revisão antes de salvar no banco
+  ai_payer_hint?: string | null; // Ex: 'PENDENTE', 'YAN', 'LARISSA', 'SHARED'
+}
+
+export interface ExtractedExpenseItem {
+  descricao: string;
+  valor: number;
+  categoria: string;
+  quem_pagou: string;
+  data?: string;
 }
 
 export interface FinancialGoal {

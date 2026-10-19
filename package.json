@@ -10,6 +10,7 @@
     "db:setup": "node scripts/db-setup.mjs"
   },
   "dependencies": {
+    "@google/genai": "^2.30.0",
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.49.1",
     "ag-grid-community": "^33.1.1",

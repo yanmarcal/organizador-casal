@@ -9,7 +9,11 @@ import {
   LARISSA_DEFAULT_ID,
 } from '@/lib/context/CoupleAuthContext';
 import { createClient } from '@/lib/supabase/client';
-import type { Expense } from '@/lib/types/database.types';
+import type {
+  Expense,
+  ExtractedExpenseItem,
+  PayerType,
+} from '@/lib/types/database.types';
 import AppHeader from '@/components/layout/AppHeader';
 import SummaryHeader from '@/components/dashboard/SummaryHeader';
 import SplitwiseBalanceCard from '@/components/dashboard/SplitwiseBalanceCard';
@@ -90,6 +94,7 @@ export default function HomePage() {
   } = useCoupleAuth();
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [draftExpenses, setDraftExpenses] = useState<Expense[]>([]);
   const [totalIncome, setTotalIncome] = useState<number>(12000);
   const [activeTab, setActiveTab] = useState<ExpenseTabFilter>('ALL_SHARED');
 
@@ -205,7 +210,7 @@ export default function HomePage() {
     }
   }, [isSupabaseReady, fetchExpenses]);
 
-  // Soma Total dos Gastos do Mês (sempre sobre o array completo para os Cards Superiores)
+  // Soma Total dos Gastos do Mês (sempre sobre o array oficial para os Cards Superiores)
   const totalExpenses = useMemo(
     () => expenses.reduce((acc, item) => acc + (Number(item.amount) || 0), 0),
     [expenses]
@@ -311,9 +316,14 @@ export default function HomePage() {
         const { data, error } = await supabase
           .from('expenses')
           .insert({
-            ...newExpenseData,
             family_group_id: targetGroupId,
+            expense_date: newExpenseData.expense_date,
+            description: newExpenseData.description,
             amount: Number(newExpenseData.amount),
+            category: newExpenseData.category,
+            payer_type: newExpenseData.payer_type,
+            paid_by_user_id: newExpenseData.paid_by_user_id,
+            created_by: newExpenseData.created_by,
           })
           .select('*')
           .single();
@@ -342,9 +352,14 @@ export default function HomePage() {
 
     const nowIso = new Date().toISOString();
     const optimisticBatch: Expense[] = batchItems.map((item, idx) => ({
-      ...item,
       family_group_id: targetGroupId,
+      expense_date: item.expense_date,
+      description: item.description,
       amount: Number(item.amount),
+      category: item.category,
+      payer_type: item.payer_type,
+      paid_by_user_id: item.paid_by_user_id,
+      created_by: item.created_by,
       id: `exp-batch-${Date.now()}-${idx}`,
       created_at: nowIso,
     }));
@@ -363,9 +378,14 @@ export default function HomePage() {
 
       if (session) {
         const payload = batchItems.map((item) => ({
-          ...item,
           family_group_id: targetGroupId,
+          expense_date: item.expense_date,
+          description: item.description,
           amount: Number(item.amount),
+          category: item.category,
+          payer_type: item.payer_type,
+          paid_by_user_id: item.paid_by_user_id,
+          created_by: item.created_by,
         }));
         const { error } = await supabase.from('expenses').insert(payload);
         if (!error) {
@@ -375,12 +395,91 @@ export default function HomePage() {
     }
   };
 
-  // Edição de Despesa / Troca de Pagador com Atualização Imediata + Refetch
+  // Adiciona itens extraídos por Visão Computacional (Gemini) em Estado Temporário de Rascunho
+  const handleAddDraftExpenses = (extractedItems: ExtractedExpenseItem[]) => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const defaultPayerId =
+      activeRole === 'USER_B' ? resolvedLarissaId : resolvedYanId;
+
+    const newDrafts: Expense[] = extractedItems.map((item, idx) => {
+      const rawPayer = (item.quem_pagou || 'PENDENTE').toUpperCase();
+      let payerType: PayerType = 'SHARED';
+      let paidByUserId = defaultPayerId;
+      let aiPayerHint: string = 'PENDENTE';
+
+      if (rawPayer === 'USER_A' || rawPayer.includes('YAN')) {
+        payerType = 'USER_A';
+        paidByUserId = resolvedYanId;
+        aiPayerHint = 'USER_A';
+      } else if (rawPayer === 'USER_B' || rawPayer.includes('LARISSA')) {
+        payerType = 'USER_B';
+        paidByUserId = resolvedLarissaId;
+        aiPayerHint = 'USER_B';
+      } else if (rawPayer === 'SHARED' || rawPayer.includes('CASAL')) {
+        payerType = 'SHARED';
+        paidByUserId = defaultPayerId;
+        aiPayerHint = 'SHARED';
+      }
+
+      return {
+        id: `draft-ai-${Date.now()}-${idx}`,
+        family_group_id: targetGroupId,
+        expense_date: item.data || todayStr,
+        description: item.descricao,
+        amount: Number(item.valor) || 0,
+        category: item.categoria || 'Outros',
+        payer_type: payerType,
+        paid_by_user_id: paidByUserId,
+        created_by: currentUser?.id || null,
+        is_draft: true,
+        ai_payer_hint: aiPayerHint,
+      };
+    });
+
+    setDraftExpenses((prev) => [...newDrafts, ...prev]);
+  };
+
+  // Salva todos os Rascunhos revisados de uma vez no Supabase e atualiza a planilha oficial
+  const handleSaveAllDrafts = async () => {
+    if (draftExpenses.length === 0) return;
+
+    const cleanBatch: Omit<Expense, 'id' | 'created_at'>[] = draftExpenses.map(
+      (draft) => ({
+        family_group_id: targetGroupId,
+        expense_date: draft.expense_date,
+        description: draft.description,
+        amount: Number(draft.amount) || 0,
+        category: draft.category,
+        payer_type: draft.payer_type,
+        paid_by_user_id: draft.paid_by_user_id,
+        created_by: draft.created_by,
+      })
+    );
+
+    setDraftExpenses([]);
+    await handleBatchAddExpenses(cleanBatch);
+  };
+
+  const handleDiscardDrafts = () => {
+    setDraftExpenses([]);
+  };
+
+  // Edição de Despesa / Troca de Pagador (funciona tanto para Rascunhos IA quanto para itens salvos)
   const handleUpdateExpense = async (updated: Expense) => {
     const normalizedUpdated: Expense = {
       ...updated,
       amount: Number(updated.amount) || 0,
     };
+
+    // Se for um item em Rascunho IA, atualiza apenas no estado temporário de rascunhos
+    if (normalizedUpdated.is_draft || normalizedUpdated.id.startsWith('draft-ai-')) {
+      setDraftExpenses((prev) =>
+        prev.map((item) =>
+          item.id === normalizedUpdated.id ? { ...normalizedUpdated } : item
+        )
+      );
+      return;
+    }
 
     // 1. Atualiza o estado local imediatamente (forçando re-render dos Cards e do AG Grid)
     setExpenses((prev) => {
@@ -418,8 +517,13 @@ export default function HomePage() {
     }
   };
 
-  // Exclusão de Despesa com Atualização Imediata + Refetch
+  // Exclusão de Despesa ou Rascunho
   const handleDeleteExpense = async (id: string) => {
+    if (id.startsWith('draft-ai-')) {
+      setDraftExpenses((prev) => prev.filter((item) => item.id !== id));
+      return;
+    }
+
     setExpenses((prev) => {
       const next = prev.filter((item) => item.id !== id);
       localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(next));
@@ -509,13 +613,17 @@ export default function HomePage() {
           totals={tabTotals}
         />
 
-        {/* 4. Planilha Editável AG Grid + Formulário com Validação + Importador de Faturas */}
+        {/* 4. Planilha Editável AG Grid + Leitura de Fotos/Prints via IA + Modo Rascunho */}
         <ExpensesDataGrid
           expenses={filteredExpenses}
+          draftExpenses={draftExpenses}
           onAddExpense={handleAddExpense}
           onBatchAddExpenses={handleBatchAddExpenses}
           onUpdateExpense={handleUpdateExpense}
           onDeleteExpense={handleDeleteExpense}
+          onAddDraftExpenses={handleAddDraftExpenses}
+          onSaveAllDrafts={handleSaveAllDrafts}
+          onDiscardDrafts={handleDiscardDrafts}
           familyGroupId={targetGroupId}
           currentUserId={currentUser.id}
           activeRole={activeRole}
