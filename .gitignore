@@ -1,0 +1,9 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env.*.local
+.agents/mcp_config.json
+*.log
+.DS_Store
