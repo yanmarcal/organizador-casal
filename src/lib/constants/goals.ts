@@ -1,8 +1,8 @@
 import type { FinancialGoal } from '@/lib/types/database.types';
 
-export const STORAGE_KEY_GOALS = 'marcal_contas_goals_v2';
-export const STORAGE_KEY_EXPENSES = 'marcal_contas_expenses_v2';
-export const STORAGE_KEY_INCOME = 'marcal_contas_monthly_income_v2';
+export const STORAGE_KEY_GOALS = 'marcal_contas_goals_v3';
+export const STORAGE_KEY_EXPENSES = 'marcal_contas_expenses_v3';
+export const STORAGE_KEY_INCOME = 'marcal_contas_monthly_income_v3';
 
 export const DEFAULT_GROUP_ID = '11111111-1111-1111-1111-111111111111';
 

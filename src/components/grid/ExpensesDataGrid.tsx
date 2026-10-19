@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   AllCommunityModule,
@@ -12,7 +12,7 @@ import {
   type ICellRendererParams,
 } from 'ag-grid-community';
 import type { Expense, PayerType } from '@/lib/types/database.types';
-import { Plus, Trash2, Table2, FileUp } from 'lucide-react';
+import { Plus, Trash2, Table2, FileUp, AlertCircle } from 'lucide-react';
 import { formatBRL } from '@/components/dashboard/SummaryHeader';
 import StatementImportModal from './StatementImportModal';
 
@@ -48,12 +48,13 @@ const LABEL_TO_PAYER: Record<string, PayerType> = {
 
 interface ExpensesDataGridProps {
   expenses: Expense[];
-  onAddExpense: (newExpense: Omit<Expense, 'id' | 'created_at'>) => void;
+  onAddExpense: (newExpense: Omit<Expense, 'id' | 'created_at'>) => Promise<void> | void;
   onBatchAddExpenses?: (newExpenses: Omit<Expense, 'id' | 'created_at'>[]) => Promise<void>;
-  onUpdateExpense: (updated: Expense) => void;
-  onDeleteExpense: (id: string) => void;
+  onUpdateExpense: (updated: Expense) => Promise<void> | void;
+  onDeleteExpense: (id: string) => Promise<void> | void;
   familyGroupId: string;
   currentUserId: string;
+  activeRole?: 'USER_A' | 'USER_B';
   userAId?: string;
   userBId?: string;
 }
@@ -77,6 +78,7 @@ export default function ExpensesDataGrid({
   onDeleteExpense,
   familyGroupId,
   currentUserId,
+  activeRole = 'USER_A',
   userAId = YAN_USER_ID,
   userBId = LARISSA_USER_ID,
 }: ExpensesDataGridProps) {
@@ -89,8 +91,15 @@ export default function ExpensesDataGrid({
   const [newCategory, setNewCategory] = useState('Mercado');
   const [newPayerType, setNewPayerType] = useState<PayerType>('SHARED');
   const [newDisbursedBy, setNewDisbursedBy] = useState<string>(
-    currentUserId === userBId ? userBId : userAId
+    activeRole === 'USER_B' ? userBId : userAId
   );
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [submittingRow, setSubmittingRow] = useState(false);
+
+  // Sincroniza o pagador padrão no formulário quando o utilizador troca entre Yan e Larissa no Header
+  useEffect(() => {
+    setNewDisbursedBy(activeRole === 'USER_B' ? userBId : userAId);
+  }, [activeRole, userAId, userBId]);
 
   const isRealProfileId = (id?: string | null) =>
     Boolean(
@@ -100,10 +109,27 @@ export default function ExpensesDataGrid({
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
     );
 
-  const handleQuickAdd = (e: React.FormEvent) => {
+  const handleQuickAdd = async (e: React.FormEvent) => {
     e.preventDefault();
+    setValidationError(null);
+
+    const trimmedDesc = newDescription.trim();
     const numericAmount = parseFloat(newAmount.replace(',', '.'));
-    if (!newDescription.trim() || isNaN(numericAmount) || numericAmount <= 0) {
+
+    if (!newDate || !/^\d{4}-\d{2}-\d{2}$/.test(newDate)) {
+      setValidationError('Por favor, selecione uma Data válida.');
+      return;
+    }
+    if (!trimmedDesc) {
+      setValidationError('Por favor, preencha a Descrição da despesa.');
+      return;
+    }
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      setValidationError('Por favor, informe um Valor maior que R$ 0,00.');
+      return;
+    }
+    if (!newCategory || !EXPENSE_CATEGORIES.includes(newCategory)) {
+      setValidationError('Por favor, selecione uma Categoria válida.');
       return;
     }
 
@@ -118,21 +144,48 @@ export default function ExpensesDataGrid({
       ? candidatePayerId
       : isRealProfileId(currentUserId)
       ? currentUserId
-      : null;
+      : candidatePayerId;
 
-    onAddExpense({
-      family_group_id: familyGroupId,
-      expense_date: newDate || todayStr,
-      description: newDescription.trim(),
-      amount: numericAmount,
-      category: newCategory,
-      payer_type: newPayerType,
-      paid_by_user_id: resolvedPaidByUserId,
-      created_by: isRealProfileId(currentUserId) ? currentUserId : null,
+    setSubmittingRow(true);
+    try {
+      await onAddExpense({
+        family_group_id: familyGroupId,
+        expense_date: newDate,
+        description: trimmedDesc,
+        amount: Number(numericAmount.toFixed(2)),
+        category: newCategory,
+        payer_type: newPayerType,
+        paid_by_user_id: resolvedPaidByUserId,
+        created_by: isRealProfileId(currentUserId) ? currentUserId : null,
+      });
+
+      setNewDescription('');
+      setNewAmount('');
+    } finally {
+      setSubmittingRow(false);
+    }
+  };
+
+  // Alterna rapidamente o pagador ao clicar no badge dentro da planilha
+  const cyclePayerType = (expense: Expense) => {
+    const nextMap: Record<PayerType, PayerType> = {
+      SHARED: 'USER_A',
+      USER_A: 'USER_B',
+      USER_B: 'SHARED',
+    };
+    const nextType = nextMap[expense.payer_type] || 'SHARED';
+    const nextPaidBy =
+      nextType === 'USER_A'
+        ? userAId
+        : nextType === 'USER_B'
+        ? userBId
+        : expense.paid_by_user_id || userAId;
+
+    onUpdateExpense({
+      ...expense,
+      payer_type: nextType,
+      paid_by_user_id: nextPaidBy,
     });
-
-    setNewDescription('');
-    setNewAmount('');
   };
 
   const columnDefs = useMemo<ColDef<Expense>[]>(
@@ -167,12 +220,12 @@ export default function ExpensesDataGrid({
         sortable: true,
         cellEditor: 'agNumberCellEditor',
         cellEditorParams: {
-          min: 0,
+          min: 0.01,
           precision: 2,
         },
         valueParser: (params) => {
           const parsed = parseFloat(String(params.newValue).replace(',', '.'));
-          return isNaN(parsed) ? params.oldValue : parsed;
+          return isNaN(parsed) || parsed <= 0 ? params.oldValue : parsed;
         },
         valueFormatter: (params) => formatBRL(Number(params.value || 0)),
         cellClass: 'font-semibold text-emerald-300',
@@ -191,9 +244,9 @@ export default function ExpensesDataGrid({
       },
       {
         field: 'payer_type',
-        headerName: 'Quem Pagou',
+        headerName: 'Quem Pagou (Clique p/ trocar)',
         editable: true,
-        width: 185,
+        width: 195,
         sortable: true,
         filter: true,
         cellEditor: 'agSelectCellEditor',
@@ -207,38 +260,51 @@ export default function ExpensesDataGrid({
         valueSetter: (params) => {
           const mapped = LABEL_TO_PAYER[String(params.newValue)];
           if (mapped && params.data) {
-            params.data.payer_type = mapped;
-            if (mapped === 'USER_A') params.data.paid_by_user_id = userAId;
-            if (mapped === 'USER_B') params.data.paid_by_user_id = userBId;
+            const updated: Expense = {
+              ...params.data,
+              payer_type: mapped,
+              paid_by_user_id:
+                mapped === 'USER_A'
+                  ? userAId
+                  : mapped === 'USER_B'
+                  ? userBId
+                  : params.data.paid_by_user_id || userAId,
+            };
+            onUpdateExpense(updated);
             return true;
           }
           return false;
         },
         cellRenderer: (params: ICellRendererParams<Expense>) => {
-          const label = params.value as string;
-          const isYan = label.startsWith('Yan');
-          const isLarissa = label.startsWith('Larissa');
+          if (!params.data) return null;
+          const row = params.data;
+          const label = PAYER_LABELS[row.payer_type] || 'Dividido (Casal)';
+          const isYan = row.payer_type === 'USER_A';
+          const isLarissa = row.payer_type === 'USER_B';
           const badgeColors = isYan
-            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
             : isLarissa
-            ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
-            : 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+            ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 hover:bg-purple-500/25'
+            : 'bg-sky-500/15 text-sky-300 border-sky-500/30 hover:bg-sky-500/25';
 
           return (
-            <span
-              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColors}`}
+            <button
+              type="button"
+              onClick={() => cyclePayerType(row)}
+              title="Clique para alternar entre Dividido, Yan e Larissa"
+              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border transition cursor-pointer ${badgeColors}`}
             >
               {isYan && '👤 '}
               {isLarissa && '👩‍❤️‍👨 '}
               {!isYan && !isLarissa && '🤝 '}
               {label}
-            </span>
+            </button>
           );
         },
       },
       {
         field: 'paid_by_user_id',
-        headerName: 'Usuário Pagador (ID)',
+        headerName: 'Desembolso (Splitwise)',
         editable: (params) => params.data?.payer_type === 'SHARED',
         width: 175,
         sortable: true,
@@ -254,8 +320,12 @@ export default function ExpensesDataGrid({
         },
         valueSetter: (params) => {
           if (!params.data) return false;
-          params.data.paid_by_user_id =
+          const nextPaidBy =
             params.newValue === 'Pago por Larissa' ? userBId : userAId;
+          onUpdateExpense({
+            ...params.data,
+            paid_by_user_id: nextPaidBy,
+          });
           return true;
         },
         cellClass: 'text-xs text-slate-300',
@@ -282,7 +352,7 @@ export default function ExpensesDataGrid({
         },
       },
     ],
-    [onDeleteExpense, userAId, userBId]
+    [onDeleteExpense, onUpdateExpense, userAId, userBId]
   );
 
   const handleCellValueChanged = (event: CellValueChangedEvent<Expense>) => {
@@ -296,53 +366,83 @@ export default function ExpensesDataGrid({
 
   return (
     <div className="space-y-4">
-      {/* Formulário Rápido de Adição de Despesa */}
+      {/* Alerta de Validação de Campos */}
+      {validationError && (
+        <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-200 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          <span>{validationError}</span>
+        </div>
+      )}
+
+      {/* Formulário Rápido de Adição de Despesa com Validação */}
       <form
         onSubmit={handleQuickAdd}
+        noValidate
         className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-lg grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3 items-end"
       >
         <div>
-          <label className="block text-[11px] font-medium text-slate-400 mb-1">Data</label>
+          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+            Data <span className="text-emerald-400">*</span>
+          </label>
           <input
             type="date"
             required
             value={newDate}
-            onChange={(e) => setNewDate(e.target.value)}
+            onChange={(e) => {
+              setNewDate(e.target.value);
+              setValidationError(null);
+            }}
             className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
           />
         </div>
 
         <div className="sm:col-span-2 lg:col-span-2">
-          <label className="block text-[11px] font-medium text-slate-400 mb-1">Descrição</label>
+          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+            Descrição <span className="text-emerald-400">*</span>
+          </label>
           <input
             type="text"
             required
             value={newDescription}
-            onChange={(e) => setNewDescription(e.target.value)}
+            onChange={(e) => {
+              setNewDescription(e.target.value);
+              setValidationError(null);
+            }}
             placeholder="Ex: Supermercado, Conta de Luz, Jantar..."
             className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
           />
         </div>
 
         <div>
-          <label className="block text-[11px] font-medium text-slate-400 mb-1">Valor (R$)</label>
+          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+            Valor (R$) <span className="text-emerald-400">*</span>
+          </label>
           <input
             type="number"
             step="0.01"
             min="0.01"
             required
             value={newAmount}
-            onChange={(e) => setNewAmount(e.target.value)}
+            onChange={(e) => {
+              setNewAmount(e.target.value);
+              setValidationError(null);
+            }}
             placeholder="0,00"
             className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
           />
         </div>
 
         <div>
-          <label className="block text-[11px] font-medium text-slate-400 mb-1">Categoria</label>
+          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+            Categoria <span className="text-emerald-400">*</span>
+          </label>
           <select
+            required
             value={newCategory}
-            onChange={(e) => setNewCategory(e.target.value)}
+            onChange={(e) => {
+              setNewCategory(e.target.value);
+              setValidationError(null);
+            }}
             className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
           >
             {EXPENSE_CATEGORIES.map((cat) => (
@@ -354,7 +454,9 @@ export default function ExpensesDataGrid({
         </div>
 
         <div>
-          <label className="block text-[11px] font-medium text-slate-400 mb-1">Quem Pagou</label>
+          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+            Quem Pagou
+          </label>
           <select
             value={newPayerType}
             onChange={(e) => setNewPayerType(e.target.value as PayerType)}
@@ -370,7 +472,7 @@ export default function ExpensesDataGrid({
           {newPayerType === 'SHARED' && (
             <div className="flex-1">
               <label className="block text-[11px] font-medium text-sky-400 mb-1">
-                Pagador (ID)
+                Pagador
               </label>
               <select
                 value={newDisbursedBy}
@@ -385,11 +487,12 @@ export default function ExpensesDataGrid({
 
           <button
             type="submit"
-            className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1 transition shrink-0 h-[34px] self-end w-full sm:w-auto"
+            disabled={submittingRow}
+            className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center justify-center gap-1 transition shrink-0 h-[34px] self-end w-full sm:w-auto shadow-md shadow-emerald-500/10"
             title="Inserir na Planilha"
           >
             <Plus className="w-4 h-4" />
-            Adicionar
+            {submittingRow ? 'Salvando...' : 'Adicionar'}
           </button>
         </div>
       </form>
@@ -399,7 +502,7 @@ export default function ExpensesDataGrid({
         <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
             <Table2 className="w-4 h-4 text-emerald-400" />
-            Planilha de Gastos (Duplo clique em qualquer célula para editar diretamente)
+            Planilha de Gastos (Clique no badge &quot;Quem Pagou&quot; ou dê duplo clique em qualquer célula para editar)
           </div>
 
           <div className="flex items-center gap-3">
@@ -441,7 +544,7 @@ export default function ExpensesDataGrid({
             await onBatchAddExpenses(items);
           } else {
             for (const item of items) {
-              onAddExpense(item);
+              await onAddExpense(item);
             }
           }
         }}
