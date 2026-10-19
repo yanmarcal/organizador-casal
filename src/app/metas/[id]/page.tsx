@@ -6,7 +6,7 @@ import { useParams } from 'next/navigation';
 import { useCoupleAuth } from '@/lib/context/CoupleAuthContext';
 import { createClient } from '@/lib/supabase/client';
 import type { FinancialGoal, GoalPriceHistory } from '@/lib/types/database.types';
-import { INITIAL_SAMPLE_GOALS, STORAGE_KEY_GOALS } from '@/app/metas/page';
+import { INITIAL_SAMPLE_GOALS, STORAGE_KEY_GOALS } from '@/lib/constants/goals';
 import PriceHistoryChart from '@/components/goals/PriceHistoryChart';
 import { formatBRL } from '@/components/dashboard/SummaryHeader';
 import {
