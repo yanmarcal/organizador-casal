@@ -334,6 +334,50 @@ export default function HomePage() {
     });
   };
 
+  const handleBatchAddExpenses = async (
+    batchItems: Omit<Expense, 'id' | 'created_at'>[]
+  ) => {
+    if (batchItems.length === 0) return;
+
+    const nowIso = new Date().toISOString();
+    const optimisticBatch: Expense[] = batchItems.map((item, idx) => ({
+      ...item,
+      family_group_id: targetGroupId || item.family_group_id,
+      amount: Number(item.amount),
+      id: `temp-batch-${Date.now()}-${idx}`,
+      created_at: nowIso,
+    }));
+
+    // 1. Atualização Otimista Imediata na Planilha e no Dashboard
+    setExpenses((prev) => [...optimisticBatch, ...prev]);
+
+    if (isSupabaseReady) {
+      const supabase = createClient();
+      const payloadToInsert = batchItems.map((item) => ({
+        ...item,
+        family_group_id: targetGroupId || item.family_group_id,
+        amount: Number(item.amount),
+      }));
+
+      await supabase.from('expenses').insert(payloadToInsert);
+
+      // 2. Refetch imediato para sincronizar todos os IDs gerados pelo Supabase
+      await fetchExpensesFromSupabase();
+      return;
+    }
+
+    // Modo Local
+    setExpenses((prev) => {
+      const finalized = prev.map((item, idx) =>
+        item.id.startsWith('temp-batch-')
+          ? { ...item, id: `exp-batch-${Date.now()}-${idx}` }
+          : item
+      );
+      localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(finalized));
+      return finalized;
+    });
+  };
+
   const handleUpdateExpense = async (updated: Expense) => {
     // Atualização otimista imediata no estado local
     setExpenses((prev) => {
@@ -582,6 +626,7 @@ export default function HomePage() {
         <ExpensesDataGrid
           expenses={filteredExpenses}
           onAddExpense={handleAddExpense}
+          onBatchAddExpenses={handleBatchAddExpenses}
           onUpdateExpense={handleUpdateExpense}
           onDeleteExpense={handleDeleteExpense}
           familyGroupId={targetGroupId || DEFAULT_GROUP_ID}

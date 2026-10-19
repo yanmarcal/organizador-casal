@@ -12,8 +12,9 @@ import {
   type ICellRendererParams,
 } from 'ag-grid-community';
 import type { Expense, PayerType } from '@/lib/types/database.types';
-import { Plus, Trash2, Table2 } from 'lucide-react';
+import { Plus, Trash2, Table2, FileUp } from 'lucide-react';
 import { formatBRL } from '@/components/dashboard/SummaryHeader';
+import StatementImportModal from './StatementImportModal';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -48,6 +49,7 @@ const LABEL_TO_PAYER: Record<string, PayerType> = {
 interface ExpensesDataGridProps {
   expenses: Expense[];
   onAddExpense: (newExpense: Omit<Expense, 'id' | 'created_at'>) => void;
+  onBatchAddExpenses?: (newExpenses: Omit<Expense, 'id' | 'created_at'>[]) => Promise<void>;
   onUpdateExpense: (updated: Expense) => void;
   onDeleteExpense: (id: string) => void;
   familyGroupId: string;
@@ -70,6 +72,7 @@ const darkGridTheme = themeQuartz.withPart(colorSchemeDarkBlue).withParams({
 export default function ExpensesDataGrid({
   expenses,
   onAddExpense,
+  onBatchAddExpenses,
   onUpdateExpense,
   onDeleteExpense,
   familyGroupId,
@@ -79,6 +82,7 @@ export default function ExpensesDataGrid({
 }: ExpensesDataGridProps) {
   const todayStr = new Date().toISOString().split('T')[0];
 
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [newDate, setNewDate] = useState(todayStr);
   const [newDescription, setNewDescription] = useState('');
   const [newAmount, setNewAmount] = useState('');
@@ -392,14 +396,26 @@ export default function ExpensesDataGrid({
 
       {/* Container da Planilha AG Grid */}
       <div className="rounded-2xl border border-slate-800 bg-slate-900/80 overflow-hidden shadow-xl">
-        <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
             <Table2 className="w-4 h-4 text-emerald-400" />
             Planilha de Gastos (Duplo clique em qualquer célula para editar diretamente)
           </div>
-          <span className="text-[11px] text-slate-400">
-            Exibindo {expenses.length} {expenses.length === 1 ? 'lançamento' : 'lançamentos'}
-          </span>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setIsImportModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-semibold text-xs flex items-center gap-1.5 transition"
+            >
+              <FileUp className="w-3.5 h-3.5" />
+              Importar Fatura (CSV/OFX/PDF/PNG/JPEG)
+            </button>
+
+            <span className="text-[11px] text-slate-400">
+              Exibindo {expenses.length} {expenses.length === 1 ? 'lançamento' : 'lançamentos'}
+            </span>
+          </div>
         </div>
 
         <div style={{ width: '100%', height: 420 }}>
@@ -415,6 +431,25 @@ export default function ExpensesDataGrid({
           />
         </div>
       </div>
+
+      {/* Modal de Importação de Fatura / Extrato em Lote */}
+      <StatementImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onConfirmBatchImport={async (items) => {
+          if (onBatchAddExpenses) {
+            await onBatchAddExpenses(items);
+          } else {
+            for (const item of items) {
+              onAddExpense(item);
+            }
+          }
+        }}
+        familyGroupId={familyGroupId}
+        currentUserId={currentUserId}
+        userAId={userAId}
+        userBId={userBId}
+      />
     </div>
   );
 }
