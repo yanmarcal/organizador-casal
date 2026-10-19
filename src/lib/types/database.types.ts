@@ -42,6 +42,7 @@ export interface Expense {
   payer_type: PayerType; // 'USER_A' (Eu), 'USER_B' (Esposa) ou 'SHARED' (Dividido)
   paid_by_user_id: string | null;
   created_by: string | null;
+  installment_group_id?: string | null; // UUID compartilhado por todas as parcelas de uma mesma compra
   created_at?: string;
   is_draft?: boolean; // Rascunho extraído por IA aguardando revisão antes de salvar no banco
   ai_payer_hint?: string | null; // Ex: 'PENDENTE', 'YAN', 'LARISSA', 'SHARED'

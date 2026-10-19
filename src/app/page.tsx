@@ -294,6 +294,7 @@ export default function HomePage() {
       ...newExpenseData,
       family_group_id: targetGroupId,
       amount: Number(newExpenseData.amount),
+      installment_group_id: newExpenseData.installment_group_id || null,
       id: tempId,
       created_at: new Date().toISOString(),
     };
@@ -313,20 +314,37 @@ export default function HomePage() {
       } = await supabase.auth.getSession();
 
       if (session) {
-        const { data, error } = await supabase
+        const basePayload = {
+          family_group_id: targetGroupId,
+          expense_date: newExpenseData.expense_date,
+          description: newExpenseData.description,
+          amount: Number(newExpenseData.amount),
+          category: newExpenseData.category,
+          payer_type: newExpenseData.payer_type,
+          paid_by_user_id: newExpenseData.paid_by_user_id,
+          created_by: newExpenseData.created_by,
+        };
+
+        const payloadWithGroup = newExpenseData.installment_group_id
+          ? { ...basePayload, installment_group_id: newExpenseData.installment_group_id }
+          : basePayload;
+
+        let { data, error } = await supabase
           .from('expenses')
-          .insert({
-            family_group_id: targetGroupId,
-            expense_date: newExpenseData.expense_date,
-            description: newExpenseData.description,
-            amount: Number(newExpenseData.amount),
-            category: newExpenseData.category,
-            payer_type: newExpenseData.payer_type,
-            paid_by_user_id: newExpenseData.paid_by_user_id,
-            created_by: newExpenseData.created_by,
-          })
+          .insert(payloadWithGroup)
           .select('*')
           .single();
+
+        // Fallback seguro caso a coluna installment_group_id ainda não tenha sido criada no banco
+        if (error && newExpenseData.installment_group_id) {
+          const retry = await supabase
+            .from('expenses')
+            .insert(basePayload)
+            .select('*')
+            .single();
+          data = retry.data;
+          error = retry.error;
+        }
 
         if (!error && data) {
           setExpenses((prev) => {
@@ -344,7 +362,7 @@ export default function HomePage() {
     }
   };
 
-  // Importação em Lote de Faturas com Atualização Imediata + Refetch
+  // Importação em Lote de Faturas / Geração de Parcelas com Atualização Imediata + Refetch
   const handleBatchAddExpenses = async (
     batchItems: Omit<Expense, 'id' | 'created_at'>[]
   ) => {
@@ -360,6 +378,7 @@ export default function HomePage() {
       payer_type: item.payer_type,
       paid_by_user_id: item.paid_by_user_id,
       created_by: item.created_by,
+      installment_group_id: item.installment_group_id || null,
       id: `exp-batch-${Date.now()}-${idx}`,
       created_at: nowIso,
     }));
@@ -377,7 +396,7 @@ export default function HomePage() {
       } = await supabase.auth.getSession();
 
       if (session) {
-        const payload = batchItems.map((item) => ({
+        const payloadWithGroup = batchItems.map((item) => ({
           family_group_id: targetGroupId,
           expense_date: item.expense_date,
           description: item.description,
@@ -386,8 +405,29 @@ export default function HomePage() {
           payer_type: item.payer_type,
           paid_by_user_id: item.paid_by_user_id,
           created_by: item.created_by,
+          ...(item.installment_group_id
+            ? { installment_group_id: item.installment_group_id }
+            : {}),
         }));
-        const { error } = await supabase.from('expenses').insert(payload);
+
+        let { error } = await supabase.from('expenses').insert(payloadWithGroup);
+
+        // Fallback seguro caso a coluna installment_group_id ainda não tenha sido criada no banco
+        if (error) {
+          const payloadWithoutGroup = batchItems.map((item) => ({
+            family_group_id: targetGroupId,
+            expense_date: item.expense_date,
+            description: item.description,
+            amount: Number(item.amount),
+            category: item.category,
+            payer_type: item.payer_type,
+            paid_by_user_id: item.paid_by_user_id,
+            created_by: item.created_by,
+          }));
+          const retry = await supabase.from('expenses').insert(payloadWithoutGroup);
+          error = retry.error;
+        }
+
         if (!error) {
           await fetchExpenses();
         }
@@ -396,6 +436,7 @@ export default function HomePage() {
   };
 
   // Adiciona itens extraídos por Visão Computacional (Gemini) em Estado Temporário de Rascunho
+  // Regra: A IA apenas extrai o que está na imagem como UM ÚNICO registro do mês atual (sem gerar parcelas futuras)
   const handleAddDraftExpenses = (extractedItems: ExtractedExpenseItem[]) => {
     const todayStr = new Date().toISOString().split('T')[0];
     const defaultPayerId =
@@ -431,6 +472,7 @@ export default function HomePage() {
         payer_type: payerType,
         paid_by_user_id: paidByUserId,
         created_by: currentUser?.id || null,
+        installment_group_id: null,
         is_draft: true,
         ai_payer_hint: aiPayerHint,
       };
@@ -453,6 +495,7 @@ export default function HomePage() {
         payer_type: draft.payer_type,
         paid_by_user_id: draft.paid_by_user_id,
         created_by: draft.created_by,
+        installment_group_id: null,
       })
     );
 

@@ -211,16 +211,21 @@ export async function POST(req: NextRequest) {
     const prompt = `Você é um assistente especialista em visão computacional financeira para o aplicativo de casal "Marçal Contas" (utilizadores: Yan e Larissa).
 Analise cuidadosamente a imagem enviada (pode ser foto de cupom fiscal, print de fatura de cartão, print de extrato bancário ou anotação de contas).
 
-Extraia TODAS as despesas visíveis na imagem e retorne ESTRITAMENTE um array JSON válido contendo objetos com as seguintes chaves:
-- "descricao" (string): Nome do estabelecimento, produto ou descrição limpa da despesa.
-- "valor" (number): Valor numérico positivo da despesa (ponto como separador decimal, ex: 125.50). Ignore saldos totais ou subtotais se as linhas individuais já estiverem listadas.
+REGRA DE OURO SOBRE PARCELAS NA LEITURA DE FATURA/IMAGEM:
+- Extraia APENAS o que está efetivamente escrito na imagem como um único registro para cada linha visível, com o valor exato que aparece na linha.
+- Se a imagem mostrar uma parcela como "Celular (2/10)" ou "TV 03/12" com valor "R$ 250,00", retorne APENAS UM ÚNICO objeto no array com "descricao": "Celular (2/10)" e "valor": 250.00.
+- NUNCA gere registros adicionais para parcelas futuras (ex: 3/10, 4/10...) nem multiplique/divida o valor lido na imagem, pois cada fatura mensal já trará a sua própria parcela no mês correspondente.
+
+Extraia as despesas visíveis na imagem e retorne ESTRITAMENTE um array JSON válido contendo objetos com as seguintes chaves:
+- "descricao" (string): Nome do estabelecimento, produto ou descrição limpa da despesa (preservando a indicação de parcela se estiver escrita na linha, ex: "Celular (2/10)").
+- "valor" (number): Valor numérico positivo exato lido na linha da despesa (ponto como separador decimal, ex: 125.50). Ignore saldos totais ou subtotais se as linhas individuais já estiverem listadas.
 - "categoria" (string): Categoria mais adequada escolhida EXATAMENTE dentre: "Moradia", "Mercado", "Alimentação / Delivery", "Transporte", "Saúde", "Lazer", "Assinaturas", "Educação", "Compras", "Outros".
 - "quem_pagou" (string):
   - Retorne "USER_A" se a imagem indicar que a conta/cartão pertence a "Yan", "Contas Yan", "Cartão Yan".
   - Retorne "USER_B" se a imagem indicar que a conta/cartão pertence a "Larissa", "Contas Larissa", "Cartão Larissa".
   - Retorne "SHARED" se a imagem indicar explicitamente despesa compartilhada/casal.
   - Retorne "PENDENTE" se a imagem não especificar quem pagou.
-- "data" (string opcional, formato YYYY-MM-DD): Data da compra caso esteja visível na linha ou no cabeçalho do comprovante (se apenas dia/mês estiverem visíveis, assuma o ano de 2026; se não houver data, use "${todayStr}").`;
+- "data" (string opcional, formato YYYY-MM-DD): Data da despesa caso esteja visível na linha ou no cabeçalho do comprovante (se apenas dia/mês estiverem visíveis, assuma o ano de 2026; se não houver data, use "${todayStr}").`;
 
     const interaction = await client.interactions.create({
       model: 'gemini-3.8-flash',

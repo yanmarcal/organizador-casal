@@ -26,6 +26,7 @@ import {
   Sparkles,
   CheckCircle2,
   XCircle,
+  CreditCard,
 } from 'lucide-react';
 import { formatBRL } from '@/components/dashboard/SummaryHeader';
 import StatementImportModal from './StatementImportModal';
@@ -60,6 +61,37 @@ const LABEL_TO_PAYER: Record<string, PayerType> = {
   'Larissa (Esposa)': 'USER_B',
   'Dividido (Casal)': 'SHARED',
 };
+
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
+ * Regra de Negócio: Data de Vencimento Fixa no dia 06 dos meses subsequentes.
+ * Para a parcela `installmentIndex` (1 até N), calcula YYYY-MM-06 a partir do mês seguinte à data base.
+ */
+export function calculateSubsequentDay06Date(
+  baseDateStr: string,
+  installmentNumber: number
+): string {
+  const [yStr, mStr] = baseDateStr.split('-');
+  const baseYear = parseInt(yStr, 10) || new Date().getFullYear();
+  const baseMonthZeroIndexed = (parseInt(mStr, 10) || new Date().getMonth() + 1) - 1;
+
+  const targetDate = new Date(
+    Date.UTC(baseYear, baseMonthZeroIndexed + installmentNumber, 6)
+  );
+  const yyyy = targetDate.getUTCFullYear();
+  const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
+  return `${yyyy}-${mm}-06`;
+}
 
 interface ExpensesDataGridProps {
   expenses: Expense[];
@@ -111,12 +143,16 @@ export default function ExpensesDataGrid({
   const [newDate, setNewDate] = useState(todayStr);
   const [newDescription, setNewDescription] = useState('');
   const [newAmount, setNewAmount] = useState('');
+  const [newInstallments, setNewInstallments] = useState<number>(1);
   const [newCategory, setNewCategory] = useState('Mercado');
   const [newPayerType, setNewPayerType] = useState<PayerType>('SHARED');
   const [newDisbursedBy, setNewDisbursedBy] = useState<string>(
     activeRole === 'USER_B' ? userBId : userAId
   );
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [installmentSuccessBanner, setInstallmentSuccessBanner] = useState<string | null>(
+    null
+  );
   const [submittingRow, setSubmittingRow] = useState(false);
   const [savingDrafts, setSavingDrafts] = useState(false);
 
@@ -136,6 +172,29 @@ export default function ExpensesDataGrid({
     [draftExpenses]
   );
 
+  // Preview dinâmico do valor de cada parcela quando Parcelas > 1
+  const installmentPreview = useMemo(() => {
+    const parsedTotal = parseFloat(newAmount.replace(',', '.'));
+    if (newInstallments <= 1 || isNaN(parsedTotal) || parsedTotal <= 0) {
+      return null;
+    }
+    const perInstallment = parsedTotal / newInstallments;
+    const firstDueDate = calculateSubsequentDay06Date(newDate || todayStr, 1);
+    const lastDueDate = calculateSubsequentDay06Date(
+      newDate || todayStr,
+      newInstallments
+    );
+    const formatPtBr = (iso: string) => {
+      const [y, m, d] = iso.split('-');
+      return `${d}/${m}/${y}`;
+    };
+    return {
+      perInstallment,
+      firstDueFormatted: formatPtBr(firstDueDate),
+      lastDueFormatted: formatPtBr(lastDueDate),
+    };
+  }, [newAmount, newInstallments, newDate, todayStr]);
+
   const isRealProfileId = (id?: string | null) =>
     Boolean(
       id &&
@@ -147,9 +206,11 @@ export default function ExpensesDataGrid({
   const handleQuickAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError(null);
+    setInstallmentSuccessBanner(null);
 
     const trimmedDesc = newDescription.trim();
     const numericAmount = parseFloat(newAmount.replace(',', '.'));
+    const totalInstallments = Math.max(1, Math.min(48, Number(newInstallments) || 1));
 
     if (!newDate || !/^\d{4}-\d{2}-\d{2}$/.test(newDate)) {
       setValidationError('Por favor, selecione uma Data válida.');
@@ -181,21 +242,69 @@ export default function ExpensesDataGrid({
       ? currentUserId
       : candidatePayerId;
 
+    const resolvedCreatedBy = isRealProfileId(currentUserId) ? currentUserId : null;
+
     setSubmittingRow(true);
     try {
-      await onAddExpense({
-        family_group_id: familyGroupId,
-        expense_date: newDate,
-        description: trimmedDesc,
-        amount: Number(numericAmount.toFixed(2)),
-        category: newCategory,
-        payer_type: newPayerType,
-        paid_by_user_id: resolvedPaidByUserId,
-        created_by: isRealProfileId(currentUserId) ? currentUserId : null,
-      });
+      if (totalInstallments === 1) {
+        // Compra à vista (1x): mantém a data informada e sem installment_group_id
+        await onAddExpense({
+          family_group_id: familyGroupId,
+          expense_date: newDate,
+          description: trimmedDesc,
+          amount: Number(numericAmount.toFixed(2)),
+          category: newCategory,
+          payer_type: newPayerType,
+          paid_by_user_id: resolvedPaidByUserId,
+          created_by: resolvedCreatedBy,
+          installment_group_id: null,
+        });
+      } else {
+        // Compra Parcelada Manual (ex: R$ 1.000 em 5x -> 5 registros de R$ 200 no dia 06 dos próximos 5 meses)
+        const sharedInstallmentGroupId = generateUUID();
+        const totalCents = Math.round(numericAmount * 100);
+        const baseInstallmentCents = Math.floor(totalCents / totalInstallments);
+        const remainderCents = totalCents - baseInstallmentCents * totalInstallments;
+
+        const generatedInstallments: Omit<Expense, 'id' | 'created_at'>[] = [];
+
+        for (let i = 1; i <= totalInstallments; i++) {
+          const itemCents =
+            baseInstallmentCents + (i === 1 ? remainderCents : 0);
+          const itemAmount = Number((itemCents / 100).toFixed(2));
+          const dueDateDay06 = calculateSubsequentDay06Date(newDate, i);
+
+          generatedInstallments.push({
+            family_group_id: familyGroupId,
+            expense_date: dueDateDay06,
+            description: `${trimmedDesc} (${i}/${totalInstallments})`,
+            amount: itemAmount,
+            category: newCategory,
+            payer_type: newPayerType,
+            paid_by_user_id: resolvedPaidByUserId,
+            created_by: resolvedCreatedBy,
+            installment_group_id: sharedInstallmentGroupId,
+          });
+        }
+
+        if (onBatchAddExpenses) {
+          await onBatchAddExpenses(generatedInstallments);
+        } else {
+          for (const item of generatedInstallments) {
+            await onAddExpense(item);
+          }
+        }
+
+        setInstallmentSuccessBanner(
+          `Compra parcelada criada! Foram gerados ${totalInstallments} lançamentos de ${formatBRL(
+            numericAmount / totalInstallments
+          )} com vencimento fixo no dia 06 dos próximos ${totalInstallments} meses.`
+        );
+      }
 
       setNewDescription('');
       setNewAmount('');
+      setNewInstallments(1);
     } finally {
       setSubmittingRow(false);
     }
@@ -238,9 +347,9 @@ export default function ExpensesDataGrid({
     () => [
       {
         field: 'expense_date',
-        headerName: 'Data',
+        headerName: 'Data / Venc.',
         editable: true,
-        width: 135,
+        width: 140,
         sortable: true,
         filter: true,
         cellRenderer: (params: ICellRendererParams<Expense>) => {
@@ -269,11 +378,12 @@ export default function ExpensesDataGrid({
         headerName: 'Descrição',
         editable: true,
         flex: 1.5,
-        minWidth: 200,
+        minWidth: 210,
         sortable: true,
         filter: true,
         cellRenderer: (params: ICellRendererParams<Expense>) => {
           if (!params.data) return null;
+          const hasGroup = Boolean(params.data.installment_group_id);
           return (
             <div className="flex items-center gap-2 truncate">
               <span
@@ -285,6 +395,15 @@ export default function ExpensesDataGrid({
               >
                 {params.data.description}
               </span>
+              {hasGroup && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/30 shrink-0"
+                  title={`Parcela vinculada (Group ID: ${params.data.installment_group_id})`}
+                >
+                  <CreditCard className="w-2.5 h-2.5" />
+                  Venc. 06
+                </span>
+              )}
             </div>
           );
         },
@@ -492,7 +611,7 @@ export default function ExpensesDataGrid({
                 </span>
               </div>
               <p className="text-xs text-amber-100/80 mt-0.5">
-                Estes gastos foram extraídos da sua foto/print e ainda não foram salvos no banco. Você pode editar a categoria, valor ou quem pagou diretamente nas linhas destacadas abaixo e clicar em <strong>Salvar Tudo</strong>.
+                Estes gastos foram extraídos da sua foto/print como lançamentos únicos do mês atual. Você pode ajustar a categoria, valor ou quem pagou diretamente na tabela abaixo e clicar em <strong>Salvar Tudo</strong>.
               </p>
             </div>
           </div>
@@ -533,127 +652,189 @@ export default function ExpensesDataGrid({
         </div>
       )}
 
-      {/* Formulário Rápido de Adição de Despesa com Validação */}
+      {/* Confirmação de Geração de Parcelas com Vencimento Dia 06 */}
+      {installmentSuccessBanner && (
+        <div className="p-3.5 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-xs text-emerald-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{installmentSuccessBanner}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setInstallmentSuccessBanner(null)}
+            className="text-emerald-300 hover:text-white text-[11px] font-semibold"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
+
+      {/* Formulário Principal de Adição de Despesa (com Campo de Parcelas e Vencimento Dia 06) */}
       <form
         onSubmit={handleQuickAdd}
         noValidate
-        className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-lg grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3 items-end"
+        className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3"
       >
-        <div>
-          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-            Data <span className="text-emerald-400">*</span>
-          </label>
-          <input
-            type="date"
-            required
-            value={newDate}
-            onChange={(e) => {
-              setNewDate(e.target.value);
-              setValidationError(null);
-            }}
-            className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-8 gap-3 items-end">
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Data da Compra <span className="text-emerald-400">*</span>
+            </label>
+            <input
+              type="date"
+              required
+              value={newDate}
+              onChange={(e) => {
+                setNewDate(e.target.value);
+                setValidationError(null);
+              }}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div className="sm:col-span-2 lg:col-span-2">
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Descrição <span className="text-emerald-400">*</span>
+            </label>
+            <input
+              type="text"
+              required
+              value={newDescription}
+              onChange={(e) => {
+                setNewDescription(e.target.value);
+                setValidationError(null);
+              }}
+              placeholder="Ex: Geladeira, Passagem, Supermercado..."
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Valor Total (R$) <span className="text-emerald-400">*</span>
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0.01"
+              required
+              value={newAmount}
+              onChange={(e) => {
+                setNewAmount(e.target.value);
+                setValidationError(null);
+              }}
+              placeholder="0,00"
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-sky-300 mb-1">
+              Parcelas
+            </label>
+            <select
+              value={newInstallments}
+              onChange={(e) => setNewInstallments(Number(e.target.value))}
+              className="w-full px-2.5 py-2 bg-slate-950 border border-sky-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-sky-400"
+            >
+              <option value={1}>1x (À vista)</option>
+              {Array.from({ length: 23 }, (_, idx) => idx + 2).map((n) => (
+                <option key={n} value={n}>
+                  {n}x (Venc. dia 06)
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Categoria <span className="text-emerald-400">*</span>
+            </label>
+            <select
+              required
+              value={newCategory}
+              onChange={(e) => {
+                setNewCategory(e.target.value);
+                setValidationError(null);
+              }}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+            >
+              {EXPENSE_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Quem Pagou
+            </label>
+            <select
+              value={newPayerType}
+              onChange={(e) => setNewPayerType(e.target.value as PayerType)}
+              className="w-full px-2.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+            >
+              <option value="USER_A">Yan (Eu)</option>
+              <option value="USER_B">Larissa (Esposa)</option>
+              <option value="SHARED">Dividido (Casal)</option>
+            </select>
+          </div>
+
+          <div className="flex gap-2">
+            {newPayerType === 'SHARED' && (
+              <div className="flex-1">
+                <label className="block text-[11px] font-medium text-sky-400 mb-1">
+                  Pagador
+                </label>
+                <select
+                  value={newDisbursedBy}
+                  onChange={(e) => setNewDisbursedBy(e.target.value)}
+                  className="w-full px-2 py-2 bg-slate-950 border border-sky-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-sky-400"
+                >
+                  <option value={userAId}>Yan</option>
+                  <option value={userBId}>Larissa</option>
+                </select>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={submittingRow}
+              className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center justify-center gap-1 transition shrink-0 h-[34px] self-end w-full sm:w-auto shadow-md shadow-emerald-500/10"
+              title="Inserir na Planilha"
+            >
+              <Plus className="w-4 h-4" />
+              {submittingRow
+                ? 'Salvando...'
+                : newInstallments > 1
+                ? `Gerar ${newInstallments}x`
+                : 'Adicionar'}
+            </button>
+          </div>
         </div>
 
-        <div className="sm:col-span-2 lg:col-span-2">
-          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-            Descrição <span className="text-emerald-400">*</span>
-          </label>
-          <input
-            type="text"
-            required
-            value={newDescription}
-            onChange={(e) => {
-              setNewDescription(e.target.value);
-              setValidationError(null);
-            }}
-            placeholder="Ex: Supermercado, Conta de Luz, Jantar..."
-            className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-            Valor (R$) <span className="text-emerald-400">*</span>
-          </label>
-          <input
-            type="number"
-            step="0.01"
-            min="0.01"
-            required
-            value={newAmount}
-            onChange={(e) => {
-              setNewAmount(e.target.value);
-              setValidationError(null);
-            }}
-            placeholder="0,00"
-            className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-            Categoria <span className="text-emerald-400">*</span>
-          </label>
-          <select
-            required
-            value={newCategory}
-            onChange={(e) => {
-              setNewCategory(e.target.value);
-              setValidationError(null);
-            }}
-            className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
-          >
-            {EXPENSE_CATEGORIES.map((cat) => (
-              <option key={cat} value={cat}>
-                {cat}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-            Quem Pagou
-          </label>
-          <select
-            value={newPayerType}
-            onChange={(e) => setNewPayerType(e.target.value as PayerType)}
-            className="w-full px-2.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
-          >
-            <option value="USER_A">Yan (Eu)</option>
-            <option value="USER_B">Larissa (Esposa)</option>
-            <option value="SHARED">Dividido (Casal)</option>
-          </select>
-        </div>
-
-        <div className="flex gap-2">
-          {newPayerType === 'SHARED' && (
-            <div className="flex-1">
-              <label className="block text-[11px] font-medium text-sky-400 mb-1">
-                Pagador
-              </label>
-              <select
-                value={newDisbursedBy}
-                onChange={(e) => setNewDisbursedBy(e.target.value)}
-                className="w-full px-2 py-2 bg-slate-950 border border-sky-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-sky-400"
-              >
-                <option value={userAId}>Yan</option>
-                <option value={userBId}>Larissa</option>
-              </select>
+        {/* Resumo em Tempo Real quando Parcelas > 1x */}
+        {installmentPreview && (
+          <div className="px-3 py-2 rounded-xl bg-sky-500/10 border border-sky-500/30 text-xs text-sky-200 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CreditCard className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>
+                Serão criados <strong>{newInstallments} registros</strong> de{' '}
+                <strong className="text-emerald-300">
+                  {formatBRL(installmentPreview.perInstallment)}
+                </strong>{' '}
+                (Ex: &quot;{newDescription.trim() || 'Compra'} (1/{newInstallments})&quot; até &quot;({newInstallments}/{newInstallments})&quot;)
+              </span>
             </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={submittingRow}
-            className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center justify-center gap-1 transition shrink-0 h-[34px] self-end w-full sm:w-auto shadow-md shadow-emerald-500/10"
-            title="Inserir na Planilha"
-          >
-            <Plus className="w-4 h-4" />
-            {submittingRow ? 'Salvando...' : 'Adicionar'}
-          </button>
-        </div>
+            <span className="text-[11px] text-sky-300 font-medium">
+              Vencimento fixo no <strong>dia 06</strong>: de{' '}
+              {installmentPreview.firstDueFormatted} até{' '}
+              {installmentPreview.lastDueFormatted}
+            </span>
+          </div>
+        )}
       </form>
 
       {/* Container da Planilha AG Grid */}

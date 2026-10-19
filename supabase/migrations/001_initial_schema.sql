@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS public.expenses (
   -- Quem efetivamente desembolsou o valor da conta compartilhada (para o cálculo Splitwise)
   paid_by_user_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_by uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  installment_group_id uuid DEFAULT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
